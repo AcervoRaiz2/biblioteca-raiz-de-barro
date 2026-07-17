@@ -13,6 +13,7 @@
   necesita servidor ni build.
 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -528,33 +529,54 @@
   // =========================================================================
   // ALMACENAMIENTO — LÉEME ANTES DE MIGRAR A GITHUB / HOSTING PROPIO
   // =========================================================================
-  // Dentro de Claude, este archivo usa `window.storage`, una función que solo
-  // existe en el entorno de artefactos de Claude.ai (guarda los datos ligados
-  // a la cuenta de Claude de quien lo abre).
+  // Este archivo soporta 3 formas de guardar datos, en este orden de
+  // prioridad:
+  //   1. `window.storage` de Claude — solo existe dentro de artefactos de
+  //      Claude.ai. Ligado a la cuenta de Claude de quien lo abre.
+  //   2. Supabase — una base de datos real y compartida en internet. Se
+  //      activa automáticamente en cuanto pegues tu URL y llave de Supabase
+  //      abajo, en SUPABASE_URL / SUPABASE_ANON_KEY. Con esto, cualquier
+  //      persona que inicie sesión (con un usuario que tú crees en tu
+  //      proyecto de Supabase) ve y edita LOS MISMOS datos, sin importar
+  //      desde qué computador entre.
+  //   3. `localStorage` del navegador — respaldo automático si ninguna de
+  //      las dos anteriores está disponible. Los datos quedan guardados
+  //      SOLO en ese navegador y ese computador.
   //
-  // Si subes este archivo a GitHub Pages (o lo abres como archivo local),
-  // `window.storage` NO existe. Este bloque detecta eso automáticamente y
-  // usa `localStorage` del navegador en su lugar, para que el catálogo y
-  // los préstamos sigan guardándose sin que tengas que cambiar nada más
-  // en el código.
-  //
-  // IMPORTANTE — limitación de localStorage:
-  //   - Los datos quedan guardados en ESE navegador y ESE computador
-  //     únicamente. Si abres la página desde otro computador, celular, o
-  //     borras el caché/historial del navegador, no vas a ver esos datos.
-  //   - Es perfecto para "una persona, un computador" (tu caso actual).
-  //   - Si en el futuro necesitas que varias personas accedan desde
-  //     computadores distintos y vean la misma información, vas a necesitar
-  //     una base de datos real en un servidor (ej. Firebase, Supabase, o un
-  //     backend propio) — en ese punto, solo hay que reemplazar las 4
-  //     funciones de abajo (storageGet / storageSet) por llamadas a esa API;
-  //     el resto del código (formularios, tablas, préstamos) no cambia.
+  // CÓMO ACTIVAR SUPABASE (resumen — sigue la guía completa que te dieron
+  // junto con este archivo):
+  //   1. Crea un proyecto gratis en supabase.com
+  //   2. En el "SQL Editor" del proyecto, ejecuta el script de creación de
+  //      tabla y permisos que se te entregó (tabla kv_store + políticas RLS).
+  //   3. En Authentication → Users, crea al usuario (o usuarios) que podrán
+  //      entrar al sistema, con su correo y contraseña.
+  //   4. En Settings → API, copia el "Project URL" y la llave pública
+  //      (anon/public key, a veces llamada "publishable key") y pégalas
+  //      abajo, reemplazando los textos de ejemplo.
+  //   5. Sube de nuevo el archivo a GitHub (o donde lo tengas hospedado).
   // =========================================================================
+  const SUPABASE_URL = "https://rghnfhijatiskmvzednn.supabase.co";
+  const SUPABASE_ANON_KEY = "sb_publishable_mNAJgpSD4CSpWb7XQpcEjw_Y1hZIBgF";
+
+  const supabaseConfigured = SUPABASE_URL.indexOf("http") === 0 && SUPABASE_ANON_KEY.length > 20;
   const usingClaudeStorage = (typeof window.storage !== "undefined" && window.storage !== null);
+  const usingSupabase = !usingClaudeStorage && supabaseConfigured && typeof window.supabase !== "undefined";
+
+  let supabaseClient = null;
+  if(usingSupabase){
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  }
 
   async function storageGet(key){
     if(usingClaudeStorage){
       return window.storage.get(key, false);
+    }
+    if(usingSupabase){
+      try{
+        const { data, error } = await supabaseClient.from("kv_store").select("value").eq("key", key).maybeSingle();
+        if(error || !data) return null;
+        return { key, value: data.value };
+      }catch(e){ return null; }
     }
     try{
       const v = localStorage.getItem("biblioteca_" + key);
@@ -564,6 +586,13 @@
   async function storageSet(key, value){
     if(usingClaudeStorage){
       return window.storage.set(key, value, false);
+    }
+    if(usingSupabase){
+      try{
+        const { error } = await supabaseClient.from("kv_store").upsert({ key, value, updated_at: new Date().toISOString() });
+        if(error) return null;
+        return { key, value };
+      }catch(e){ return null; }
     }
     try{
       localStorage.setItem("biblioteca_" + key, value);
@@ -1324,10 +1353,12 @@
   async function init(){
     if(!clockStarted){
       tickClock(); setInterval(tickClock, 60000); clockStarted = true;
-      $("#storage-mode").textContent = usingClaudeStorage ? "Guardado: Claude" : "Guardado: este navegador";
+      $("#storage-mode").textContent = usingClaudeStorage ? "Guardado: Claude" : (usingSupabase ? "Guardado: Supabase (compartido)" : "Guardado: este navegador");
       $("#storage-mode").title = usingClaudeStorage
         ? "Los datos se guardan en tu cuenta de Claude."
-        : "Los datos se guardan en este navegador (localStorage). No se verán desde otro computador o navegador.";
+        : (usingSupabase
+            ? "Los datos se guardan en Supabase — todas las personas que inicien sesión ven la misma información."
+            : "Los datos se guardan en este navegador (localStorage). No se verán desde otro computador o navegador.");
     }
     await loadAll();
     renderCatalog();
@@ -1335,19 +1366,45 @@
   }
 
   // ---------- Login gate ----------
+  // Estas credenciales SOLO se usan si Supabase no está configurado arriba
+  // (es decir, dentro de Claude o en la versión simple sin base de datos).
+  // Cuando Supabase está activo, el usuario y la contraseña reales son los
+  // que creaste en Authentication → Users de tu proyecto de Supabase — no
+  // los que están escritos aquí.
   const AUTH_USER = "raizdebarro@gmail.com";
   const AUTH_PASS = "RqWezhP_6EGDNN";
 
-  function tryLogin(){
+  function showApp(){
+    $("#login-screen").style.display = "none";
+    $("#app-shell").style.display = "block";
+    $("#login-user").value = ""; $("#login-pass").value = "";
+    init();
+  }
+
+  async function tryLogin(){
     const userVal = ($("#login-user").value || "").trim().toLowerCase();
     const passVal = $("#login-pass").value || "";
     const err = $("#login-error");
+    err.style.display = "none";
+
+    if(usingSupabase){
+      const btn = $("#login-btn");
+      btn.disabled = true; btn.textContent = "Ingresando…";
+      const { error } = await supabaseClient.auth.signInWithPassword({ email: userVal, password: passVal });
+      btn.disabled = false; btn.textContent = "Ingresar";
+      if(error){
+        err.textContent = "Usuario o contraseña incorrectos.";
+        err.style.display = "block";
+        $("#login-pass").value = ""; $("#login-pass").focus();
+        return;
+      }
+      showApp();
+      return;
+    }
+
+    // Modo sin Supabase: verificación local fija (dentro de Claude o localStorage)
     if(userVal === AUTH_USER && passVal === AUTH_PASS){
-      err.style.display = "none";
-      $("#login-screen").style.display = "none";
-      $("#app-shell").style.display = "block";
-      $("#login-user").value = ""; $("#login-pass").value = "";
-      init();
+      showApp();
     }else{
       err.textContent = "Usuario o contraseña incorrectos.";
       err.style.display = "block";
@@ -1364,11 +1421,25 @@
     inp.type = showing ? "password" : "text";
     $("#toggle-pass").textContent = showing ? "Mostrar contraseña" : "Ocultar contraseña";
   });
-  $("#logout-btn").addEventListener("click", ()=>{
+  $("#logout-btn").addEventListener("click", async ()=>{
+    if(usingSupabase){
+      try{ await supabaseClient.auth.signOut(); }catch(e){}
+    }
     $("#app-shell").style.display = "none";
     $("#login-screen").style.display = "flex";
     $("#login-user").focus();
   });
-  $("#login-user").focus();
+
+  // Si ya hay una sesión de Supabase activa en este navegador (por ejemplo,
+  // recargaste la página sin cerrar sesión), entra directo sin pedir clave.
+  (async function checkExistingSession(){
+    if(usingSupabase){
+      try{
+        const { data } = await supabaseClient.auth.getSession();
+        if(data && data.session){ showApp(); return; }
+      }catch(e){}
+    }
+    $("#login-user").focus();
+  })();
 })();
 </script>
